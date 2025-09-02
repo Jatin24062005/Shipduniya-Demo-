@@ -1,0 +1,45 @@
+const express = require("express");
+const router = express.Router();
+const multer = require("multer");
+const upload = require("../middlewares/uploadMiddleware");
+const { authMiddleware, roleMiddleware } = require("../middlewares/auth");
+const {
+  createForwardOrder,
+  createReverseOrder,
+  editOrderByUser,
+  getOrders,
+  deleteOrderByUser,
+  getOrderByID,
+  softDeleteOrderByUser,
+} = require("../controllers/OrderController");
+
+// router.post('/create', authMiddleware, createOrder);
+router.post(
+  "/create-forward-order",
+  authMiddleware,
+ upload.fields([
+  { name: "file", maxCount: 1 },   
+  { name: "image", maxCount: 1 },  
+]),
+  createForwardOrder
+);
+
+// Route for editing an order by the user
+router.put("/:orderId", authMiddleware,upload.single("image"), editOrderByUser);
+
+router.post(
+  "/create-forward-order/bulk",
+  authMiddleware,
+  upload.single("file"),
+  createForwardOrder
+);
+
+router.post("/create-reverse-order", authMiddleware, createReverseOrder);
+
+router.get("/", authMiddleware, getOrders);
+router.patch("/delete/:id", authMiddleware, softDeleteOrderByUser);
+router.get("/:id", authMiddleware, getOrderByID);
+
+//edit order
+
+module.exports = router;

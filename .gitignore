@@ -1,0 +1,13 @@
+.env
+node_modules/
+.git/
+.next/
+.next/
+.next/
+shipduniya-server-v1/key.json
+shipduniya-server-v1/key.json
+shipduniya-server-v1/key.json
+.env
+node_modules/
+.next/
+dist/

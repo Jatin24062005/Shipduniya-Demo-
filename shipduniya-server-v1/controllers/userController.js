@@ -1,0 +1,1204 @@
+const bcrypt = require("bcryptjs");
+const axios = require("axios");
+require("dotenv").config();
+const twilio = require("twilio");
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+const Order = require("../models/Order");
+const Shipment = require("../models/Shipping")
+const OtpModel = require("../models/Otp");
+const Ticket = require("../models/Ticket");
+const { generateId } = require("../utils/helpers");
+const chargesSheet = require("../chargesSheet");
+const nodemailer = require("nodemailer");
+const crypto = require("crypto");
+const RemittanceRequest = require("../models/RemittanceRequest");
+
+// Initialize Twilio client
+const twilioClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
+
+const sendPhoneOtp = async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone)
+      return res
+        .status(400)
+        .json({ success: false, message: "Phone number is required." });
+
+    // Check if phone number is already registered
+    const existingUser = await User.findOne({ phone });
+    if (existingUser) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Phone number already registered." });
+    }
+
+    const otp = Math.floor(1000 + Math.random() * 9000);
+
+    // Store OTP in the database
+    await OtpModel.updateOne(
+      { phone, type: "phone" },
+      { otp, verified: false, createdAt: new Date() },
+      { upsert: true }
+    );
+
+    const options = {
+      method: "POST",
+      url: "https://www.fast2sms.com/dev/bulkV2",
+      headers: {
+        authorization: process.env.FAST2SMS_API_KEY,
+        "Content-Type": "application/json",
+      },
+      data: {
+        message: `Welcome to Shipduniya...!! Your SignUp OTP code is ${otp}`,
+        language: "english",
+        route: "q",
+        numbers: phone,
+      },
+    };
+
+    const response = await axios.request(options);
+    console.log("OTP sent successfully:", response.data);
+    res.status(200).json({ success: true, message: "OTP sent successfully." });
+  } catch (error) {
+    console.error(
+      "Error sending OTP:",
+      error.response ? error.response.data : error.message
+    );
+    res.status(500).json({ success: false, message: "Failed to send OTP." });
+  }
+};
+
+const sendPhoneOtpWithoutCheckingUser = async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone)
+      return res
+        .status(400)
+        .json({ success: false, message: "Phone number is required." });
+
+    const otp = Math.floor(1000 + Math.random() * 9000);
+
+    // Store OTP in the database
+    await OtpModel.updateOne(
+      { phone, type: "phone" },
+      { otp, verified: false, createdAt: new Date() },
+      { upsert: true }
+    );
+
+    const options = {
+      method: "POST",
+      url: "https://www.fast2sms.com/dev/bulkV2",
+      headers: {
+        authorization: process.env.FAST2SMS_API_KEY,
+        "Content-Type": "application/json",
+      },
+      data: {
+        message: `You requested to reset your password on Shipduniya. Your OTP code is ${otp}.`,
+        language: "english",
+        route: "q",
+        numbers: phone,
+      },
+    };
+
+    const response = await axios.request(options);
+    console.log("OTP sent successfully:", response.data);
+    res.status(200).json({ success: true, message: "OTP sent successfully." });
+  } catch (error) {
+    console.error(
+      "Error sending OTP:",
+      error.response ? error.response.data : error.message
+    );
+    res.status(500).json({ success: false, message: "Failed to send OTP." });
+  }
+};
+
+const sendEmailOtp = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required.",
+      });
+    }
+
+    // Check if email is already registered
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "Email ID already registered.",
+      });
+    }
+
+    // Generate OTP
+    const emailOtp = Math.floor(1000 + Math.random() * 9000);
+    console.log(`Email OTP: ${emailOtp}`);
+
+    // Save OTP in the database
+    await OtpModel.findOneAndUpdate(
+      { email, type: "email" },
+      {
+        email,
+        otp: emailOtp,
+        type: "email",
+        verified: false,
+        createdAt: new Date(),
+      },
+      { upsert: true, new: true }
+    );
+
+    // Microsoft 365 SMTP Configuration
+    const transporter = nodemailer.createTransport({
+      host: "smtp.office365.com",
+      port: 587,
+      secure: false, // STARTTLS
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+      tls: {
+        rejectUnauthorized: false, // Optional for local testing
+      },
+    });
+
+    // Send the email
+    await transporter.sendMail({
+      from: `"Ship Duniya" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Your Email OTP - Ship Duniya",
+      text: `Welcome to Ship Duniya!\nYour OTP for email verification is ${emailOtp}. It will expire in 10 minutes.`,
+      html: `<p>Welcome to <b>Ship Duniya</b>!</p>
+             <p>Your OTP for email verification is: <b>${emailOtp}</b></p>
+             <p>This OTP will expire in 10 minutes.</p>`,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Email OTP sent successfully.",
+    });
+  } catch (error) {
+    console.error("Error sending email OTP:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error sending OTP. Try again later.",
+    });
+  }
+};
+
+const sendEmailForgotOtp = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required.",
+      });
+    }
+
+    // Check if email is registered
+    const existingUser = await User.findOne({ email });
+    if (!existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "Email ID is not registered.",
+      });
+    }
+
+    // Generate OTP
+    const emailOtp = Math.floor(1000 + Math.random() * 9000);
+    console.log(`Email OTP: ${emailOtp}`);
+
+    // Save or update OTP in DB
+    await OtpModel.findOneAndUpdate(
+      { email, type: "email" },
+      {
+        email,
+        otp: emailOtp,
+        type: "email",
+        verified: false,
+        createdAt: new Date(),
+      },
+      { upsert: true, new: true }
+    );
+
+    // Microsoft 365 Transporter
+    const transporter = nodemailer.createTransport({
+      host: "smtp.office365.com",
+      port: 587,
+      secure: false, // STARTTLS
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+      tls: {
+        rejectUnauthorized: false, // Optional for local testing
+      },
+    });
+
+    // Send the email
+    await transporter.sendMail({
+      from: `"Ship Duniya" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Reset Password OTP - Ship Duniya",
+      text: `Hello,\n\nYour OTP to reset your password is: ${emailOtp}. It is valid for 10 minutes.\n\n- Ship Duniya`,
+      html: `<p>Hello,</p>
+             <p>Your OTP to reset your password is: <b>${emailOtp}</b></p>
+             <p>This OTP is valid for 10 minutes.</p>
+             <p>- Ship Duniya</p>`,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Email OTP sent successfully.",
+    });
+  } catch (error) {
+    console.error("Error sending email OTP:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error sending OTP. Try again later.",
+    });
+  }
+};
+
+const verifyEmailOtp = async (req, res) => {
+  try {
+    const email = req.body.email?.trim();
+    const otp = req.body.otp?.toString().trim();
+
+    if (!email || !otp) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Email and OTP are required." });
+    }
+
+    const otpRecord = await OtpModel.findOne({ email, type: "email" });
+    if (!otpRecord) {
+      return res
+        .status(400)
+        .json({ success: false, message: "OTP not found." });
+    }
+
+    // OTP expiry check (10 minutes)
+    const expiryTime = new Date(otpRecord.createdAt);
+    expiryTime.setMinutes(expiryTime.getMinutes() + 10);
+    if (new Date() > expiryTime) {
+      return res
+        .status(400)
+        .json({ success: false, message: "OTP has expired." });
+    }
+
+    if (String(otpRecord.otp) !== otp) {
+      return res.status(400).json({ success: false, message: "Invalid OTP." });
+    }
+
+    await OtpModel.updateOne({ email, type: "email" }, { verified: true });
+
+    return res.status(200).json({
+      success: true,
+      message: "Email OTP verified successfully.",
+    });
+  } catch (error) {
+    console.error("Error verifying email OTP:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to verify OTP.",
+    });
+  }
+};
+
+const verifyPhoneOtp = async (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+    if (!phone || !otp)
+      return res.status(400).json({ message: "Phone and OTP are required." });
+
+    const otpRecord = await OtpModel.findOne({ phone, type: "phone" });
+
+    if (!otpRecord) return res.status(400).json({ message: "OTP not found." });
+
+    // Check OTP expiration (optional, set 5-minute expiry)
+    const now = new Date();
+    if (now - otpRecord.createdAt > 5 * 60 * 1000) {
+      return res.status(400).json({ message: "OTP expired." });
+    }
+
+    if (otpRecord.otp !== otp)
+      return res.status(400).json({ message: "Invalid OTP." });
+
+    await OtpModel.updateOne({ phone, type: "phone" }, { verified: true });
+
+    res.status(200).json({ message: "Phone OTP verified successfully." });
+  } catch (error) {
+    console.error("Error verifying phone OTP:", error);
+    res.status(500).json({ message: "Failed to verify OTP." });
+  }
+};
+
+const forgotPassword = async (req, res) => {
+  try {
+    let { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and new password are required.",
+      });
+    }
+
+    // Normalize email
+    email = email.toLowerCase();
+
+    // Find user
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found." });
+    }
+
+    // Check if old and new password are same
+    try {
+      const isSamePassword = await bcrypt.compare(password, user.password);
+      if (isSamePassword) {
+        return res.status(400).json({
+          success: false,
+          message: "New password must be different from the old password.",
+        });
+      }
+    } catch (compareError) {
+      console.error("Error comparing passwords:", compareError);
+      return res.status(500).json({
+        success: false,
+        message: "Password comparison failed.",
+      });
+    }
+
+    // Hash and save new password
+    try {
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      user.password = hashedPassword;
+      await user.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Password reset successfully.",
+      });
+    } catch (hashOrSaveError) {
+      console.error("Error hashing/saving new password:", hashOrSaveError);
+      return res.status(500).json({
+        success: false,
+        message: "Error saving new password.",
+      });
+    }
+  } catch (error) {
+    console.error("Error in forgotPassword controller:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to reset password.",
+    });
+  }
+};
+
+const registerUser = async (req, res) => {
+  try {
+    let { name, email, phone, password, terms } = req.body;
+
+    // Check OTP verification for email
+    const emailVerified = await OtpModel.findOne({
+      email,
+      type: "email",
+      verified: true,
+    });
+    if (!emailVerified)
+      return res
+        .status(400)
+        .json({ message: "Please verify email OTP first." });
+
+    // Check OTP verification for phone
+    // const phoneVerified = await OtpModel.findOne({
+    //   phone,
+    //   type: "phone",
+    //   verified: true,
+    // });
+    // if (!phoneVerified)
+    //   return res
+    //     .status(400)
+    //     .json({ message: "Please verify phone OTP first." });
+
+    // Check if user already exists
+    email = email.toLowerCase();
+    const userExists = await User.findOne({ $or: [{ email }, { phone }] });
+    if (userExists)
+      return res.status(400).json({ message: "User already exists." });
+
+    if (!terms)
+      return res
+        .status(400)
+        .json({ message: "Please accept terms & conditions." });
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user
+    const user = await User.create({
+      name,
+      email,
+      phone,
+      password: hashedPassword,
+    });
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: user._id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    // Delete OTP records after successful registration
+    await OtpModel.deleteMany({ email, phone });
+
+    res.status(201).json({
+      message: "User registered successfully",
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+      },
+      token,
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// User login
+const loginUser = async (req, res) => {
+  let { email, password } = req.body;
+  if (!email || !password) {
+    return res
+      .status(400)
+      .json({ message: "Email and password are required." });
+  }
+
+  email = email.toLowerCase();
+
+  try {
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(400).json({ message: "Invalid email or password" });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: "Invalid email or password" });
+    }
+
+    const token = jwt.sign(
+      { id: user._id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    res.json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      token,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error });
+  }
+};
+
+// Reset password
+const resetPassword = async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res
+      .status(400)
+      .json({ error: "Email and new password are required." });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    // Hash the new password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Update the user's password
+    user.password = hashedPassword;
+    await user.save();
+
+    res.status(200).json({ message: "Password reset successfully." });
+  } catch (error) {
+    console.error("Error resetting password:", error);
+    res.status(500).json({ error: "Failed to reset password." });
+  }
+};
+
+const getUserByAwb = async (req, res) => {
+  try {
+    const awbNumber = req.body.awb;
+    if (!awbNumber) {
+      return res.status(400).json({ message: "AWB is missing" });
+    }
+
+    const shipment = await Shipment.findOne({ awbNumber })
+      .populate('orderIds')
+      .populate('userId'); // Fetch user in same query
+
+    if (!shipment) {
+      return res.status(404).json({ message: "Shipment not found" });
+    }
+
+    return res.status(200).json({
+      user: shipment.userId, // already populated
+      shipment
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+// Get Single User by ID
+const getUserProfile = async (req, res) => {
+  try {
+    // Validate that the request contains a valid user ID
+    if (!req.user || !req.user.id) {
+      return res
+        .status(400)
+        .json({ message: "Invalid request: User ID is missing" });
+    }
+
+    // Fetch the user by ID
+    const user = await User.findById(req.user.id);
+
+    // Check if the user exists
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Return the user data
+    return res.status(200).json(user);
+  } catch (error) {
+    console.error("Error fetching user profile:", error);
+
+    // Handle different types of errors
+    if (error.name === "CastError") {
+      return res.status(400).json({ message: "Invalid User ID format" });
+    }
+
+    // Catch any other server-side errors
+    return res.status(500).json({
+      message: "An error occurred while fetching user profile",
+      error: error.message,
+    });
+  }
+};
+
+// Update user profile
+const updateUserProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (req.file) {
+
+      user.avatar = {
+        data: req.file.buffer,
+        contentType: req.file.mimetype,
+      };
+    }
+    // Update basic profile details
+    user.name = req.body.name || user.name;
+    user.email = req.body.email || user.email;
+    user.phone = req.body.phone || user.phone;
+    user.gstNumber = req.body.gstNumber || user.gstNumber;
+    user.panNumber = req.body.panNumber || user.panNumber;
+    user.aadharNumber = req.body.aadharNumber || user.aadharNumber;
+    user.address = req.body.address || user.address;
+    user.pincode = req.body.pincode || user.pincode;
+
+    // Update bank account details
+    if (req.body.bankDetails) {
+      user.bankDetails.forEach((bankDetail, index) => {
+        if (req.body.bankDetails[index]) {
+          const updatedBankDetail = req.body.bankDetails[index];
+
+          bankDetail.accountHolderName =
+            updatedBankDetail.accountHolderName || bankDetail.accountHolderName;
+          bankDetail.bankName =
+            updatedBankDetail.bankName || bankDetail.bankName;
+          bankDetail.accountNumber =
+            updatedBankDetail.accountNumber || bankDetail.accountNumber;
+          bankDetail.ifscCode =
+            updatedBankDetail.ifscCode || bankDetail.ifscCode;
+          bankDetail.accountType =
+            updatedBankDetail.accountType || bankDetail.accountType;
+          bankDetail.branchName =
+            updatedBankDetail.branchName || bankDetail.branchName;
+        }
+      });
+    }
+
+    // Ensure metrics are not updated by the user directly
+    if (req.body.metrics) {
+      return res
+        .status(400)
+        .json({ message: "Cannot update metrics directly" });
+    }
+
+    // Save the updated user profile
+    await user.save();
+    res.json({ message: "Profile updated successfully", user });
+  } catch (error) {
+    console.error("Error updating profile:", error);
+    res.status(500).json({ message: "Server error while updating profile" });
+  }
+};
+
+const updateUserById = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    user.name = req.body.name || user.name;
+    user.email = req.body.email || user.email;
+    user.phone = req.body.phone || user.phone;
+    user.customerType = req.body.customerType || user.customerType;
+    if (req.body.password) {
+      user.password = await bcrypt.hash(req.body.password, 10);
+    }
+
+    await user.save();
+    res.status(200).json(user);
+  } catch (error) {
+    res.status(500).json({ message: "Error updating user", error });
+  }
+};
+
+const deleteUserById = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    await Ticket.deleteMany({ userId: user._id });
+    const deleteduser = await User.findByIdAndDelete(req.params.userId);
+    res.status(200).json(user);
+  } catch (error) {
+    res.status(500).json({ message: "Error updating user", error });
+  }
+};
+
+const getUserBankAccounts = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    res.status(200).json(user.bankDetails);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching Account details", error });
+  }
+};
+
+// Add another account to a User
+const addBankDetail = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    user.bankDetails.push(req.body);
+    await user.save();
+
+    res.status(201).json({
+      message: "Account detail added successfully",
+      bankDetails: user.bankDetails,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding Account detail", error });
+  }
+};
+
+//Edit Bank details
+const editBankDetail = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const { bankId } = req.params;
+    const bankDetailIndex = user.bankDetails.findIndex(
+      (detail) => detail._id.toString() === bankId
+    );
+
+    if (bankDetailIndex === -1) {
+      return res.status(404).json({ message: "Bank detail not found" });
+    }
+
+    user.bankDetails[bankDetailIndex] = {
+      ...user.bankDetails[bankDetailIndex],
+      ...req.body,
+    };
+    await user.save();
+
+    res.status(200).json({
+      message: "Bank detail updated successfully",
+      bankDetails: user.bankDetails,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating bank detail", error });
+  }
+};
+
+// Delete a account Detail of a user
+const deleteBankDetailById = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const bankDetail = user.bankDetails.id(req.params.bankDetailId);
+    if (!bankDetail) {
+      return res.status(404).json({ message: "Account detail not found" });
+    }
+
+    bankDetail.remove();
+    await user.save();
+
+    res.status(200).json({ message: "Account deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Account could not be deleted", error });
+  }
+};
+
+const getUserMetrics = async (req, res) => {
+  try {
+    // Fetch userId from req.user.id
+    const userId = req.user.id;
+
+    // Find the user by ID
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Fetch all shipped orders for the user (only orders where shipped is true)
+    const orders = await Order.find({ userId, shipped: true });
+
+    // Check if there are any shipped orders
+    if (!orders.length) {
+      return res.status(200).json({
+        totalParcels: [],
+        totalDelivered: [],
+        totalRTO: [],
+        totalPendingPickup: [],
+        totalInTransit: [],
+        totalLost: [],
+      });
+    }
+
+    // Initialize metrics map for each category
+    const metrics = {
+      totalParcels: [],
+      totalDelivered: [],
+      totalRTO: [],
+      totalPendingPickup: [],
+      totalInTransit: [],
+      totalLost: [],
+    };
+
+    // Group orders by date and partner for each metric
+    orders.forEach((order) => {
+      const date = new Date(order.createdAt).toISOString().split("T")[0]; // Format: YYYY-MM-DD
+      const formattedDate = date.split("-").reverse().join("-"); // Convert to DD-MM-YYYY
+      const partner = order.partner;
+
+      // Function to initialize or increment a key in metrics array
+      const incrementMetric = (metricKey) => {
+        const existingMetric = metrics[metricKey].find(
+          (item) => item.date === formattedDate && item.partner === partner
+        );
+
+        if (existingMetric) {
+          existingMetric.value += 1;
+        } else {
+          metrics[metricKey].push({
+            date: formattedDate,
+            partner: partner,
+            value: 1,
+          });
+        }
+      };
+
+      // Increment Total Parcels for every shipped order
+      incrementMetric("totalParcels");
+
+      // Increment specific metrics based on order status
+      const status = order.status.toLowerCase();
+      if (status === "delivered") incrementMetric("totalDelivered");
+      else if (status === "rto") incrementMetric("totalRTO");
+      else if (status === "pending pickup")
+        incrementMetric("totalPendingPickup");
+      else if (status === "in transit") incrementMetric("totalInTransit");
+      else if (status === "lost") incrementMetric("totalLost");
+    });
+
+    // Ensure that the date format is consistent across all categories
+    const formatResponse = (data) => {
+      // Sort by date and partner (ascending order)
+      return data.sort((a, b) => {
+        const dateA = new Date(a.date.split("-").reverse().join("-"));
+        const dateB = new Date(b.date.split("-").reverse().join("-"));
+        return dateA - dateB;
+      });
+    };
+
+    // Return the response in the required format
+    const response = {
+      totalparcels: formatResponse(metrics.totalParcels),
+      totaldelivered: formatResponse(metrics.totalDelivered),
+      totalrto: formatResponse(metrics.totalRTO),
+      totalpendingpickup: formatResponse(metrics.totalPendingPickup),
+      totalIntransit: formatResponse(metrics.totalInTransit),
+      totallost: formatResponse(metrics.totalLost),
+    };
+
+    // Return the metrics data
+    return res.status(200).json(response);
+  } catch (error) {
+    console.error("Error fetching user metrics:", error.message);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+const addBankAccount = async (req, res) => {
+  try {
+    // Validate that the request contains a valid user ID
+    if (!req.user || !req.user.id) {
+      return res
+        .status(400)
+        .json({ message: "Invalid request: User ID is missing" });
+    }
+
+    const {
+      accountHolderName,
+      bankName,
+      accountNumber,
+      ifscCode,
+      accountType,
+      branchName,
+    } = req.body;
+
+    // Validate the input fields
+    if (!accountHolderName || !bankName || !accountNumber || !ifscCode) {
+      return res
+        .status(400)
+        .json({ message: "All required fields must be provided" });
+    }
+
+    // Validate the IFSC code format
+    const ifscRegex = /^[A-Z]{4}0[A-Z0-9]{6}$/;
+    if (!ifscRegex.test(ifscCode)) {
+      return res.status(400).json({ message: "Invalid IFSC code format" });
+    }
+
+    // Find the user by ID
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Create a new bank account object
+    const newBankAccount = {
+      accountHolderName,
+      bankName,
+      accountNumber,
+      ifscCode,
+      accountType,
+      branchName,
+    };
+
+    // Add the new bank account to the user's bankDetails array
+    user.bankDetails.push(newBankAccount);
+
+    await user.save();
+
+    return res.status(201).json({
+      message: "Bank account added successfully",
+      bankDetails: user.bankDetails,
+    });
+  } catch (error) {
+    console.error("Error adding bank account:", error.message);
+    return res.status(500).json({
+      message: "An error occurred while adding bank account",
+      error: error.message,
+    });
+  }
+};
+
+const deleteBankAccount = async (req, res) => {
+  try {
+    // Validate that the request contains a valid user ID
+    if (!req.user || !req.user.id) {
+      return res
+        .status(400)
+        .json({ message: "Invalid request: User ID is missing" });
+    }
+
+    const { bankAccountId } = req.params;
+
+    // Validate the input fields
+    if (!bankAccountId) {
+      return res
+        .status(400)
+        .json({ message: "Bank account ID must be provided" });
+    }
+
+    // Find the user by ID
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Find the index of the bank account to be removed using the `_id`
+    const accountIndex = user.bankDetails.findIndex(
+      (account) => account._id.toString() === bankAccountId
+    );
+
+    if (accountIndex === -1) {
+      return res.status(404).json({ message: "Bank account not found" });
+    }
+
+    // Remove the bank account from the array
+    user.bankDetails.splice(accountIndex, 1);
+
+    await user.save();
+
+    return res.status(200).json({
+      message: "Bank account deleted successfully",
+      bankDetails: user.bankDetails,
+    });
+  } catch (error) {
+    console.error("Error deleting bank account:", error.message);
+    return res.status(500).json({
+      message: "An error occurred while deleting the bank account",
+      error: error.message,
+    });
+  }
+};
+
+const fetchUserCodRemittanceOrders = async (req, res) => {
+  try {
+    const id = req.user.id; // Extract userId from the token via `authenticate` middleware
+
+    const remittance = await RemittanceRequest.find({ userId: id }).populate(
+      "userId"
+    );
+
+    if (!remittance || remittance.length === 0) {
+      return res
+        .status(200)
+        .json({ message: "No COD delivered orders found for this user." });
+    }
+
+    // Respond with the filtered orders
+    res.status(200).json(remittance);
+  } catch (error) {
+    console.error("Error fetching user COD remittance orders:", error.message);
+    res.status(500).json({ message: "Internal server error." });
+  }
+};
+
+/**
+ * Update the active bank for a user.
+ * @param {Request} req - Express request object
+ * @param {Response} res - Express response object
+ */
+const updateActiveBank = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { bankId } = req.body;
+
+    if (!bankId) {
+      return res.status(400).json({
+        success: false,
+        error: "Bank ID is required.",
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found.",
+      });
+    }
+
+    // Check if the bank exists in the user's bankDetails
+    const bankIndex = user.bankDetails.findIndex(
+      (b) => b._id.toString() === bankId
+    );
+
+    if (bankIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        error: "Bank not found in user's account.",
+      });
+    }
+
+    // Set all banks to isActive: false
+    user.bankDetails.forEach((bank) => (bank.isActive = false));
+
+    // Set the selected bank to isActive: true
+    user.bankDetails[bankIndex].isActive = true;
+
+    // Save the updated user data
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Active bank updated successfully.",
+      bankDetails: user.bankDetails,
+    });
+  } catch (error) {
+    console.error("Error updating active bank:", error.stack);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update active bank.",
+      details: error.message,
+    });
+  }
+};
+
+const updateUserRateSheet = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { rateSheet } = req.body;
+
+    if (!rateSheet) {
+      return res.status(400).json({ message: "rateSheet is required." });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    user.rateSheet = rateSheet;
+    await user.save();
+
+    res.status(200).json({
+      message: "User rateSheet updated successfully.",
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        rateSheet: user.rateSheet,
+      },
+    });
+  } catch (error) {
+    console.error("Error updating user rateSheet:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+const updateCustomerType = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const { customerType, multiplier } = req.body;
+
+    if (!customerType) {
+      return res.status(400).json({ message: "customerType is required" });
+    }
+
+    user.customerType = customerType;
+
+    if (customerType === "custom") {
+      if (typeof multiplier !== "number" || isNaN(multiplier)) {
+        return res
+          .status(400)
+          .json({
+            message:
+              "Multiplier must be provided and must be a number when customerType is 'custom'",
+          });
+      }
+      user.multiplier = multiplier;
+    } else {
+      user.multiplier = undefined; // Remove multiplier if not custom
+    }
+
+    await user.save();
+
+    res.status(200).json({
+      message: "Customer type updated successfully",
+      customerType: user.customerType,
+      multiplier: user.multiplier,
+    });
+  } catch (error) {
+    console.error("Error updating customer type:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+module.exports = {
+  registerUser,
+  loginUser,
+  getUserProfile,
+  updateUserProfile,
+  updateUserById,
+  updateUserById,
+  deleteUserById,
+  getUserBankAccounts,
+  addBankDetail,
+  deleteBankDetailById,
+  getUserMetrics,
+  addBankAccount,
+  deleteBankAccount,
+  fetchUserCodRemittanceOrders,
+  sendEmailOtp,
+  sendEmailForgotOtp,
+  sendPhoneOtp,
+  sendPhoneOtpWithoutCheckingUser,
+  verifyEmailOtp,
+  verifyPhoneOtp,
+  forgotPassword,
+  resetPassword,
+  updateActiveBank,
+  editBankDetail,
+  updateUserRateSheet,
+  updateCustomerType,
+  getUserByAwb
+};
